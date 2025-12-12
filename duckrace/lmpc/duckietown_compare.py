@@ -31,6 +31,11 @@ def _build_env(frame_rate: int):
     try:
         from gym_duckietown.simulator import Simulator
     except Exception as e:  # pragma: no cover
+        if "NoSuchDisplayException" in repr(e):
+            raise RuntimeError(
+                "Duckietown simulator requires an X display. Run in a desktop session or under Xvfb "
+                "(e.g. `xvfb-run -s '-screen 0 1280x720x24' python3 -m duckrace.lmpc.duckietown_compare ...`)."
+            ) from e
         raise RuntimeError(
             "Duckietown simulator not available. Install `duckietown-gym-daffy` "
             "and its dependencies."
@@ -57,6 +62,8 @@ def run_compare(
     quantum_horizon: int,
     quantum_samples_per_start: int,
     quantum_start_states: int,
+    quantum_min_terminal_v: float,
+    quantum_min_advance_steps: int,
 ):
     import utils
     from casadi import DM, Function, vertcat
@@ -209,6 +216,8 @@ def run_compare(
         n_start_states=int(quantum_start_states),
         n_samples_per_start=int(quantum_samples_per_start),
         sampler=QuantumSamplerConfig(backend=quantum_backend, n_iterations=1, seed=0),
+        min_terminal_v=float(quantum_min_terminal_v),
+        min_advance_steps=int(quantum_min_advance_steps),
     )
 
     baseline, quantum_res = compare_lmpc_baseline_vs_quantum(
@@ -231,6 +240,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--quantum-horizon", type=int, default=4)
     parser.add_argument("--quantum-start-states", type=int, default=8)
     parser.add_argument("--quantum-samples-per-start", type=int, default=4)
+    parser.add_argument("--quantum-min-terminal-v", type=float, default=0.45)
+    parser.add_argument("--quantum-min-advance-steps", type=int, default=1)
     parser.add_argument("--plot", action="store_true", default=False)
     parser.add_argument("--plot-out", type=str, default="assets/lmpc_compare.png")
     parser.add_argument("--feasibility-tol", type=float, default=1.05)
@@ -245,6 +256,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         quantum_horizon=int(args.quantum_horizon),
         quantum_samples_per_start=int(args.quantum_samples_per_start),
         quantum_start_states=int(args.quantum_start_states),
+        quantum_min_terminal_v=float(args.quantum_min_terminal_v),
+        quantum_min_advance_steps=int(args.quantum_min_advance_steps),
     )
 
     print("baseline best lap (s):", baseline.best_lap_seconds)
@@ -254,9 +267,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     if bool(args.diagnostics):
         b_i = baseline.best_loop_index
         print("baseline best loop steps:", baseline.plain_loops[b_i].shape[1])
+        b_v = baseline.plain_loops[b_i][3, :]
+        print("baseline v (min/mean/max):", float(np.min(b_v)), float(np.mean(b_v)), float(np.max(b_v)))
         if quantum_res is not None:
             q_i = quantum_res.best_loop_index
             print("quantum best loop steps:", quantum_res.plain_loops[q_i].shape[1])
+            q_v = quantum_res.plain_loops[q_i][3, :]
+            print("quantum v (min/mean/max):", float(np.min(q_v)), float(np.mean(q_v)), float(np.max(q_v)))
+            if quantum_res.augment_extra_points:
+                print("quantum augment extra points per iter:", quantum_res.augment_extra_points)
+                print("quantum augment extra v mean per iter:", quantum_res.augment_extra_v_mean)
+                print("quantum augment extra J mean per iter:", quantum_res.augment_extra_J_mean)
 
     if bool(args.plot):
         from pathlib import Path

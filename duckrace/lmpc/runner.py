@@ -51,6 +51,9 @@ class LMPCRunResult:
     step_times: List[float]
     casadi_times: List[float]
     dt: float
+    augment_extra_points: List[int]
+    augment_extra_v_mean: List[float]
+    augment_extra_J_mean: List[float]
 
     @property
     def best_lap_seconds(self) -> float:
@@ -139,6 +142,9 @@ def run_lmpc_iterations(
     step_times: List[float] = [0.0]
     casadi_times: List[float] = [0.0]
     iteration_times: List[float] = [0.0]
+    augment_extra_points: List[int] = []
+    augment_extra_v_mean: List[float] = []
+    augment_extra_J_mean: List[float] = []
 
     for iteration in range(int(n_iterations)):
         it_start = timer()
@@ -274,9 +280,21 @@ def run_lmpc_iterations(
 
         plain_loops.append(X_log)
         last_points = _with_time_row(X_log)
+        base_last_points = last_points
 
         if augment_cfg.enabled and augmenter is not None:
             last_points = augmenter(last_points, traj_xytheta, inside_xy, outside_xy, augment_cfg)
+            extra_n = int(max(0, last_points.shape[1] - base_last_points.shape[1]))
+            augment_extra_points.append(extra_n)
+            if extra_n > 0:
+                extra = last_points[:, base_last_points.shape[1] :]
+                v_mean = float(np.mean(extra[3])) if extra.shape[0] > 3 else float("nan")
+                J_mean = float(np.mean(extra[-1]))
+            else:
+                v_mean = float("nan")
+                J_mean = float("nan")
+            augment_extra_v_mean.append(v_mean)
+            augment_extra_J_mean.append(J_mean)
 
         loops_with_time.append(last_points)
 
@@ -290,4 +308,7 @@ def run_lmpc_iterations(
         step_times=step_times,
         casadi_times=casadi_times,
         dt=dt,
+        augment_extra_points=augment_extra_points,
+        augment_extra_v_mean=augment_extra_v_mean,
+        augment_extra_J_mean=augment_extra_J_mean,
     )

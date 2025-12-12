@@ -75,6 +75,8 @@ print("quantum   best lap (s):", quantum.best_lap_seconds)
 Notes:
 - The quantum augmenter uses Qiskit statevector sampling by default; for IBM Q, configure `QuantumSamplerConfig(backend="ibm_runtime", ...)` inside `QuantumLMPCAugmenterConfig`.
 - The feasibility check is approximate (distance to centerline <= half track width at nearest index). If you see unsafe points being added, tighten `feasibility_tol`.
+- If quantum makes laps slower, tighten augmentation by increasing `min_terminal_v` and/or `min_advance_steps` in `QuantumLMPCAugmenterConfig` (this reduces “slow” or non-improving points being added to the safe set). The current default `min_terminal_v` is tuned to avoid slow-point pollution.
+- You can also set `min_terminal_v_quantile` (e.g. `0.5` or `0.7`) so added points must be at least as fast as the median/70th-percentile speed of the current lap.
 
 ## One-Command Script
 
@@ -85,4 +87,5 @@ python3 -m duckrace.lmpc.duckietown_compare --iterations 5
 python3 -m duckrace.lmpc.duckietown_compare --iterations 5 --quantum --quantum-backend statevector
 python3 -m duckrace.lmpc.duckietown_compare --iterations 5 --quantum --plot --plot-out assets/lmpc_compare.png
 python3 -m duckrace.lmpc.duckietown_compare --iterations 5 --quantum --diagnostics
+python3 -m duckrace.lmpc.duckietown_compare --iterations 5 --quantum --diagnostics --quantum-min-terminal-v 0.40 --quantum-min-advance-steps 3
 ```

@@ -16,6 +16,15 @@ class QuantumLMPCAugmenterConfig:
     n_samples_per_start: int = 4
     sampler: QuantumSamplerConfig = QuantumSamplerConfig(backend="statevector", n_iterations=1, seed=0)
     feasibility_tol: float = 1.05
+    # Only keep samples whose terminal state is near a safe-set point that is at least
+    # `min_advance_steps` "steps-to-go" ahead of the expected progress (J_start - horizon).
+    # This prevents adding slow/redundant points that don't improve lap time.
+    min_advance_steps: int = 1
+    # Reject augmented points with very low terminal speed; these tend to degrade LMPC.
+    min_terminal_v: float = 0.45
+    # Also require terminal v >= quantile of the current lap's v distribution.
+    # This helps prevent adding "slow-but-feasible" points that drag the policy down.
+    min_terminal_v_quantile: float = 0.5
 
 
 def _is_on_track(
@@ -75,6 +84,15 @@ def augment_safe_set_with_quantum(
 
     for si in start_idxs:
         x0 = last_points_with_time[:-1, si].reshape(-1)
+        J_start = float(last_points_with_time[-1, si])  # steps-to-go at start state
+
+        v_floor = float(cfg.min_terminal_v)
+        if last_points_with_time.shape[0] > 3:
+            lap_v = np.asarray(last_points_with_time[3, :], dtype=float).reshape(-1)
+            lap_v = lap_v[np.isfinite(lap_v)]
+            if lap_v.size > 0:
+                q = float(np.clip(cfg.min_terminal_v_quantile, 0.0, 1.0))
+                v_floor = max(v_floor, float(np.quantile(lap_v, q)))
 
         # Build cost table by rolling out all 4^h sequences and scoring by nearest safe J.
         costs = np.full((n_total,), float("inf"), dtype=float)
@@ -85,11 +103,27 @@ def augment_safe_set_with_quantum(
                 u = np.array([wl[t], wr[t]], dtype=float)
                 x = np.asarray(model_F(x, u)).reshape(-1)
             xy = x[:2]
+            vT = float(x[3]) if x.size > 3 else float("nan")
             _, traj_idx = kd_traj.query(xy.reshape(-1), workers=-1)
             if not _is_on_track(xy, int(traj_idx), traj_xy, inside_xy, outside_xy, tol=cfg.feasibility_tol):
                 continue
             _, safe_idx = kd_safe.query(xy.reshape(-1), workers=-1)
-            costs[idx] = float(horizon + safe_J[int(safe_idx)])
+            safe_idx = int(safe_idx)
+
+            # Filter out clearly slow terminal states (usually from {0,1} wheel discretization).
+            # Use an absolute threshold to avoid dependence on v_start (which can be ~0 early on).
+            if np.isfinite(vT) and float(vT) < float(v_floor):
+                continue
+
+            # Require that terminal xy "snaps" to a strictly later safe-set point than
+            # we'd get by just advancing `horizon` steps along the current loop.
+            expected_J = J_start - float(horizon)
+            advance = expected_J - float(safe_J[safe_idx])
+            if advance < float(cfg.min_advance_steps):
+                continue
+
+            # Cost is "how much we advanced" (more advance => lower cost).
+            costs[idx] = float(-advance)
 
         # If everything is infeasible, skip.
         finite = costs[np.isfinite(costs)]
@@ -107,8 +141,19 @@ def augment_safe_set_with_quantum(
                 u = np.array([wl[t], wr[t]], dtype=float)
                 x = np.asarray(model_F(x, u)).reshape(-1)
             xy = x[:2]
+            vT = float(x[3]) if x.size > 3 else float("nan")
+            if np.isfinite(vT) and float(vT) < float(v_floor):
+                continue
+
             _, safe_idx = kd_safe.query(xy.reshape(-1), workers=-1)
-            J_new = float(horizon + safe_J[int(safe_idx)])
+            safe_idx = int(safe_idx)
+            expected_J = J_start - float(horizon)
+            advance = expected_J - float(safe_J[safe_idx])
+            if advance < float(cfg.min_advance_steps):
+                continue
+
+            # Label J with the snapped safe-set point (progress along the lap).
+            J_new = float(safe_J[safe_idx])
             new_cols.append(np.concatenate([x.reshape(-1), np.array([J_new], dtype=float)]))
 
     if not new_cols:
