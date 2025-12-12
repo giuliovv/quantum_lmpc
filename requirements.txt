@@ -1,0 +1,17 @@
+py-multihash==0.2.3
+wheel
+duckietown-gym-daffy==6.1.30
+gym==0.21.0
+matplotlib==3.5.1
+numpy==1.22
+pyglet<2.0
+casadi
+scikit-learn
+scipy
+
+# Quantum sampling (simulation + IBM Runtime, used by `duckrace.quantum`)
+qiskit
+qiskit-ibm-runtime
+
+# Tests
+pytest
