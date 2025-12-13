@@ -64,6 +64,7 @@ def run_compare(
     quantum_start_states: int,
     quantum_min_terminal_v: float,
     quantum_min_advance_steps: int,
+    no_augment: bool = False,
 ):
     import utils
     from casadi import DM, Function, vertcat
@@ -211,6 +212,8 @@ def run_compare(
         )
         return baseline, None, traj3, np.asarray(inside, dtype=float), np.asarray(outside, dtype=float)
 
+    # When no_augment=True, set min_terminal_v_quantile=0.0 to remove all filters
+    min_terminal_v_quantile = 0.0 if no_augment else 0.5
     qcfg = QuantumLMPCAugmenterConfig(
         horizon=int(quantum_horizon),
         n_start_states=int(quantum_start_states),
@@ -218,6 +221,7 @@ def run_compare(
         sampler=QuantumSamplerConfig(backend=quantum_backend, n_iterations=1, seed=0),
         min_terminal_v=float(quantum_min_terminal_v),
         min_advance_steps=int(quantum_min_advance_steps),
+        min_terminal_v_quantile=float(min_terminal_v_quantile),
     )
 
     baseline, quantum_res = compare_lmpc_baseline_vs_quantum(
@@ -242,6 +246,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--quantum-samples-per-start", type=int, default=4)
     parser.add_argument("--quantum-min-terminal-v", type=float, default=0.45)
     parser.add_argument("--quantum-min-advance-steps", type=int, default=1)
+    parser.add_argument("--no-augment", action="store_true", default=False,
+                        help="Remove quantum augmentation filters (min_terminal_v, min_advance_steps) for fair comparison")
     parser.add_argument("--plot", action="store_true", default=False)
     parser.add_argument("--plot-out", type=str, default="assets/lmpc_compare.png")
     parser.add_argument("--feasibility-tol", type=float, default=1.05)
@@ -249,6 +255,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     cfg = DuckietownCompareConfig(n_iterations=int(args.iterations))
+    # When --no-augment is set, remove filters to allow unrestricted augmentation
+    if bool(args.no_augment):
+        quantum_min_terminal_v = 0.0
+        quantum_min_advance_steps = 0
+    else:
+        quantum_min_terminal_v = float(args.quantum_min_terminal_v)
+        quantum_min_advance_steps = int(args.quantum_min_advance_steps)
     baseline, quantum_res, traj3, inside_xy, outside_xy = run_compare(
         cfg=cfg,
         quantum=bool(args.quantum),
@@ -256,8 +269,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         quantum_horizon=int(args.quantum_horizon),
         quantum_samples_per_start=int(args.quantum_samples_per_start),
         quantum_start_states=int(args.quantum_start_states),
-        quantum_min_terminal_v=float(args.quantum_min_terminal_v),
-        quantum_min_advance_steps=int(args.quantum_min_advance_steps),
+        quantum_min_terminal_v=quantum_min_terminal_v,
+        quantum_min_advance_steps=quantum_min_advance_steps,
+        no_augment=bool(args.no_augment),
     )
 
     print("baseline best lap (s):", baseline.best_lap_seconds)
@@ -283,6 +297,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         from pathlib import Path
 
         from duckrace.lmpc.plotting import TrackGeometry, plot_laps, track_violation_report
+        from duckrace.lmpc.compare import plot_lap_times
 
         # Best loops (5,T)
         b_loop = baseline.plain_loops[baseline.best_loop_index]
@@ -304,6 +319,10 @@ def main(argv: Optional[list[str]] = None) -> int:
             title="LMPC lap paths (best)",
         )
         print("wrote plot:", str(out_path))
+
+        lap_times_out = out_path.with_name(f"{out_path.stem}_lap_times{out_path.suffix}")
+        plot_lap_times(out_path=lap_times_out, baseline=baseline, quantum=quantum_res)
+        print("wrote plot:", str(lap_times_out))
 
         b_rep = track_violation_report(loop_xy=b_xy, geom=geom, feasibility_tol=float(args.feasibility_tol))
         print("baseline corridor report:", b_rep)
