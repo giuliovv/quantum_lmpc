@@ -44,21 +44,11 @@ def sample_indices_ibm_runtime(
     Requires `qiskit-ibm-runtime` and a configured account (see `connection_test.ipynb`).
     """
     try:
-        from qiskit_ibm_runtime import QiskitRuntimeService, Session
+        from qiskit_ibm_runtime import QiskitRuntimeService, SamplerV2
     except Exception as e:  # pragma: no cover
         raise RuntimeError(
             "IBM Runtime backend requested but qiskit-ibm-runtime is not available."
         ) from e
-
-    # SamplerV2 exists in newer qiskit-ibm-runtime; fall back to Sampler in older versions.
-    SamplerCls = None
-    try:
-        from qiskit_ibm_runtime import SamplerV2 as SamplerCls  # type: ignore
-    except Exception:  # pragma: no cover
-        try:
-            from qiskit_ibm_runtime import Sampler as SamplerCls  # type: ignore
-        except Exception as e:  # pragma: no cover
-            raise RuntimeError("Could not import an IBM Runtime Sampler primitive.") from e
 
     service = QiskitRuntimeService()
     if config.backend_name is not None:
@@ -71,33 +61,50 @@ def sample_indices_ibm_runtime(
     rng = np.random.default_rng(seed)
     n_states = 2**n_qubits
 
-    sampled: list[int] = []
-    with Session(service=service, backend=backend) as session:
-        sampler = SamplerCls(session=session)
+    # Transpile circuits for the target backend
+    from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
+    pm = generate_preset_pass_manager(backend=backend, optimization_level=1)
+    isa_circuits = pm.run(circuits)
 
-        # Try to pass shots in a version-tolerant way.
-        try:
-            job = sampler.run(circuits, shots=config.shots)
-        except TypeError:  # pragma: no cover
-            job = sampler.run(circuits)
+    # Run with SamplerV2 (qiskit-ibm-runtime >= 0.21)
+    sampler = SamplerV2(mode=backend)
+    job = sampler.run(isa_circuits, shots=config.shots)
+    result = job.result()
 
-        result = job.result()
+    # Extract counts from PubResult - newer API returns BitArray in data
+    pub_result = result[0]
+    if hasattr(pub_result, "data"):
+        # Find the measurement register (usually 'meas' or 'c')
+        data = pub_result.data
+        bit_array = None
+        for attr in ["meas", "c"] + [k for k in dir(data) if not k.startswith("_")]:
+            candidate = getattr(data, attr, None)
+            if candidate is not None and hasattr(candidate, "get_counts"):
+                bit_array = candidate
+                break
+        if bit_array is None:
+            raise RuntimeError(f"Could not find measurement data in result: {dir(data)}")
+        counts = bit_array.get_counts()
+    elif hasattr(pub_result, "quasi_dists"):
+        # Fallback for older result format
+        probs = _quasi_to_probs(pub_result.quasi_dists[0], n_states=n_states)
+        return rng.choice(n_states, size=n_samples, replace=True, p=probs).tolist()
+    else:
+        raise RuntimeError(f"Unexpected result format: {type(pub_result)}")
 
-        # Try common result shapes.
-        quasi_dists = None
-        if hasattr(result, "quasi_dists"):
-            quasi_dists = result.quasi_dists
-        elif hasattr(result, "quasi_distributions"):
-            quasi_dists = result.quasi_distributions
-        elif isinstance(result, (list, tuple)) and len(result) > 0 and hasattr(result[0], "quasi_dists"):
-            quasi_dists = result[0].quasi_dists
+    # Convert counts dict (bitstring -> count) to probability distribution
+    probs = np.zeros((n_states,), dtype=float)
+    total = 0
+    for bitstring, count in counts.items():
+        # Bitstring is in little-endian format from qiskit, convert to int
+        idx = int(bitstring, 2)
+        probs[idx] = float(count)
+        total += count
+    if total > 0:
+        probs /= total
+    else:
+        probs[:] = 1.0 / n_states
 
-        if quasi_dists is None:  # pragma: no cover
-            raise RuntimeError("Sampler result did not expose quasi distributions.")
-
-        # For now we only use the first circuit's distribution.
-        probs = _quasi_to_probs(quasi_dists[0], n_states=n_states)
-        sampled = rng.choice(n_states, size=n_samples, replace=True, p=probs).tolist()
-
+    sampled = rng.choice(n_states, size=n_samples, replace=True, p=probs).tolist()
     return [int(x) for x in sampled]
 

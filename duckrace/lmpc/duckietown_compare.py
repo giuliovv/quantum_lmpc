@@ -19,8 +19,8 @@ class DuckietownCompareConfig:
     delay_seconds: float = 0.15
 
     # LMPC
-    N: int = 2
-    K: int = 8
+    N: int = 3
+    K: int = 6
     i_j: int = 4
     i_j_all: bool = False
     more: int = 20
@@ -64,7 +64,6 @@ def run_compare(
     quantum_start_states: int,
     quantum_min_terminal_v: float,
     quantum_min_advance_steps: int,
-    no_augment: bool = False,
 ):
     import utils
     from casadi import DM, Function, vertcat
@@ -72,7 +71,7 @@ def run_compare(
 
     from duckrace.lmpc import LMPCKit, LMPCRunConfig, compare_lmpc_baseline_vs_quantum
     from duckrace.quantum.lmpc_augment import QuantumLMPCAugmenterConfig
-    from duckrace.quantum.sampler import QuantumSamplerConfig
+    from duckrace.quantum.sampler import QuantumSamplerConfig, reset_quantum_timing, get_quantum_timing
 
     env = _build_env(cfg.frame_rate)
 
@@ -165,8 +164,18 @@ def run_compare(
         if (t / env.frame_rate) > 60:
             break
 
-    # Compare LMPC iterations
-    M_lmpc = Function.load("LMPC.casadi")
+    # Compare LMPC iterations - load or generate LMPC for current K, i_j, N
+    from pathlib import Path
+    lmpc_file = f"LMPC_K{cfg.K}_ij{cfg.i_j}_N{cfg.N}.casadi"
+    if cfg.K == 8 and cfg.i_j == 4 and cfg.N == 2:
+        lmpc_file = "LMPC.casadi"  # default file
+
+    if not Path(lmpc_file).exists():
+        print(f"Generating {lmpc_file} for K={cfg.K}, i_j={cfg.i_j}, N={cfg.N}...")
+        from scripts.generate_lmpc import generate_lmpc
+        generate_lmpc(K=cfg.K, i_j=cfg.i_j, N=cfg.N, output=lmpc_file)
+
+    M_lmpc = Function.load(lmpc_file)
 
     run_cfg = LMPCRunConfig(
         N=int(cfg.N),
@@ -210,10 +219,11 @@ def run_compare(
             config=run_cfg,
             n_iterations=int(cfg.n_iterations),
         )
-        return baseline, None, traj3, np.asarray(inside, dtype=float), np.asarray(outside, dtype=float)
+        return baseline, None, traj3, np.asarray(inside, dtype=float), np.asarray(outside, dtype=float), None
 
-    # When no_augment=True, set min_terminal_v_quantile=0.0 to remove all filters
-    min_terminal_v_quantile = 0.0 if no_augment else 0.5
+    # Reset quantum timing before quantum run
+    reset_quantum_timing()
+
     qcfg = QuantumLMPCAugmenterConfig(
         horizon=int(quantum_horizon),
         n_start_states=int(quantum_start_states),
@@ -221,7 +231,6 @@ def run_compare(
         sampler=QuantumSamplerConfig(backend=quantum_backend, n_iterations=1, seed=0),
         min_terminal_v=float(quantum_min_terminal_v),
         min_advance_steps=int(quantum_min_advance_steps),
-        min_terminal_v_quantile=float(min_terminal_v_quantile),
     )
 
     baseline, quantum_res = compare_lmpc_baseline_vs_quantum(
@@ -230,7 +239,11 @@ def run_compare(
         n_iterations=int(cfg.n_iterations),
         quantum_cfg=qcfg,
     )
-    return baseline, quantum_res, traj3, np.asarray(inside, dtype=float), np.asarray(outside, dtype=float)
+
+    # Capture quantum timing
+    quantum_timing = get_quantum_timing()
+
+    return baseline, quantum_res, traj3, np.asarray(inside, dtype=float), np.asarray(outside, dtype=float), quantum_timing
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -239,39 +252,42 @@ def main(argv: Optional[list[str]] = None) -> int:
         description="Compare baseline LMPC vs quantum-augmented LMPC on Duckietown (ETH_large_loop).",
     )
     parser.add_argument("--iterations", type=int, default=5)
+    parser.add_argument("--K", type=int, default=6, help="Number of neighbors per lap (requires matching LMPC.casadi)")
+    parser.add_argument("--i-j", type=int, default=4, help="Number of past laps in safe set (requires matching LMPC.casadi)")
+    parser.add_argument("--N", type=int, default=3, help="LMPC horizon (requires matching LMPC.casadi)")
     parser.add_argument("--quantum", action="store_true", default=False)
     parser.add_argument("--quantum-backend", choices=["statevector", "ibm_runtime"], default="statevector")
+    parser.add_argument("--ibm", action="store_true", default=False, help="Shorthand for --quantum-backend ibm_runtime (run on real IBM Q hardware)")
     parser.add_argument("--quantum-horizon", type=int, default=4)
     parser.add_argument("--quantum-start-states", type=int, default=8)
     parser.add_argument("--quantum-samples-per-start", type=int, default=4)
     parser.add_argument("--quantum-min-terminal-v", type=float, default=0.45)
     parser.add_argument("--quantum-min-advance-steps", type=int, default=1)
-    parser.add_argument("--no-augment", action="store_true", default=False,
-                        help="Remove quantum augmentation filters (min_terminal_v, min_advance_steps) for fair comparison")
     parser.add_argument("--plot", action="store_true", default=False)
     parser.add_argument("--plot-out", type=str, default="assets/lmpc_compare.png")
     parser.add_argument("--feasibility-tol", type=float, default=1.05)
     parser.add_argument("--diagnostics", action="store_true", default=False)
+    parser.add_argument("--timing", action="store_true", default=False, help="Output detailed timing comparison")
     args = parser.parse_args(argv)
 
-    cfg = DuckietownCompareConfig(n_iterations=int(args.iterations))
-    # When --no-augment is set, remove filters to allow unrestricted augmentation
-    if bool(args.no_augment):
-        quantum_min_terminal_v = 0.0
-        quantum_min_advance_steps = 0
-    else:
-        quantum_min_terminal_v = float(args.quantum_min_terminal_v)
-        quantum_min_advance_steps = int(args.quantum_min_advance_steps)
-    baseline, quantum_res, traj3, inside_xy, outside_xy = run_compare(
+    # --ibm is shorthand for --quantum-backend ibm_runtime
+    quantum_backend = str(args.quantum_backend)
+    if args.ibm:
+        quantum_backend = "ibm_runtime"
+
+    K = int(args.K)
+    i_j = int(getattr(args, "i_j"))
+    N = int(args.N)
+    cfg = DuckietownCompareConfig(n_iterations=int(args.iterations), K=K, i_j=i_j, N=N)
+    baseline, quantum_res, traj3, inside_xy, outside_xy, quantum_timing = run_compare(
         cfg=cfg,
         quantum=bool(args.quantum),
-        quantum_backend=str(args.quantum_backend),
+        quantum_backend=quantum_backend,
         quantum_horizon=int(args.quantum_horizon),
         quantum_samples_per_start=int(args.quantum_samples_per_start),
         quantum_start_states=int(args.quantum_start_states),
-        quantum_min_terminal_v=quantum_min_terminal_v,
-        quantum_min_advance_steps=quantum_min_advance_steps,
-        no_augment=bool(args.no_augment),
+        quantum_min_terminal_v=float(args.quantum_min_terminal_v),
+        quantum_min_advance_steps=int(args.quantum_min_advance_steps),
     )
 
     print("baseline best lap (s):", baseline.best_lap_seconds)
@@ -292,6 +308,35 @@ def main(argv: Optional[list[str]] = None) -> int:
                 print("quantum augment extra points per iter:", quantum_res.augment_extra_points)
                 print("quantum augment extra v mean per iter:", quantum_res.augment_extra_v_mean)
                 print("quantum augment extra J mean per iter:", quantum_res.augment_extra_J_mean)
+
+    if bool(args.timing):
+        print("\n=== TIMING COMPARISON ===")
+        # Baseline timing
+        baseline_total = sum(baseline.iteration_times)
+        baseline_casadi = sum(baseline.casadi_times)
+        print(f"Baseline (classical):")
+        print(f"  Total iteration time:  {baseline_total:.3f} s")
+        print(f"  CasADi solver time:    {baseline_casadi:.3f} s")
+        print(f"  Per-iteration mean:    {baseline_total / max(1, len(baseline.iteration_times)):.3f} s")
+
+        if quantum_res is not None:
+            quantum_total = sum(quantum_res.iteration_times)
+            quantum_casadi = sum(quantum_res.casadi_times)
+            print(f"\nQuantum ({quantum_backend}):")
+            print(f"  Total iteration time:  {quantum_total:.3f} s")
+            print(f"  CasADi solver time:    {quantum_casadi:.3f} s")
+            print(f"  Per-iteration mean:    {quantum_total / max(1, len(quantum_res.iteration_times)):.3f} s")
+
+            if quantum_timing:
+                print(f"\n  Quantum sampler stats ({quantum_timing.get('backend', 'unknown')}):")
+                print(f"    Total sampler time:  {quantum_timing.get('total_seconds', 0):.3f} s")
+                print(f"    Number of calls:     {quantum_timing.get('n_calls', 0)}")
+                if quantum_timing.get('n_calls', 0) > 0:
+                    print(f"    Mean per call:       {quantum_timing.get('mean_seconds', 0):.4f} s")
+
+            # Comparison
+            overhead = quantum_total - baseline_total
+            print(f"\n  Quantum overhead:      {overhead:+.3f} s ({100 * overhead / max(0.001, baseline_total):+.1f}%)")
 
     if bool(args.plot):
         from pathlib import Path

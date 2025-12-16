@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Literal, Optional
+from dataclasses import dataclass, field
+from timeit import default_timer as timer
+from typing import Literal, Optional, List
 
 import numpy as np
 
@@ -11,6 +12,30 @@ from .qiskit_backend import IBMRuntimeConfig, sample_indices_ibm_runtime
 
 
 BackendKind = Literal["statevector", "ibm_runtime"]
+
+
+# Global timing accumulator for quantum operations
+_quantum_timing: dict = {"samples": [], "backend": None}
+
+
+def get_quantum_timing() -> dict:
+    """Get accumulated quantum timing stats."""
+    samples = _quantum_timing["samples"]
+    if not samples:
+        return {"backend": _quantum_timing["backend"], "total_seconds": 0.0, "n_calls": 0, "samples": []}
+    return {
+        "backend": _quantum_timing["backend"],
+        "total_seconds": sum(samples),
+        "n_calls": len(samples),
+        "mean_seconds": sum(samples) / len(samples),
+        "samples": samples.copy(),
+    }
+
+
+def reset_quantum_timing():
+    """Reset quantum timing accumulator."""
+    _quantum_timing["samples"] = []
+    _quantum_timing["backend"] = None
 
 
 @dataclass(frozen=True)
@@ -75,6 +100,7 @@ class QuantumControlSampler:
 
     def sample(self, cost_table: np.ndarray, threshold: float, n_samples: int = 10) -> list[int]:
         oracle_diag = phase_oracle_diagonal(cost_table=cost_table, threshold=threshold)
+        _quantum_timing["backend"] = self.config.backend
 
         if self.config.backend == "statevector":
             try:
@@ -82,6 +108,7 @@ class QuantumControlSampler:
             except Exception as e:  # pragma: no cover
                 raise RuntimeError("statevector backend requires `qiskit` to be installed.") from e
 
+            t_start = timer()
             qc = _build_grover_circuit(
                 n_qubits=self.n_qubits,
                 oracle_diag=oracle_diag,
@@ -92,21 +119,26 @@ class QuantumControlSampler:
             probs = np.asarray(sv.probabilities(), dtype=float)
             probs = probs / probs.sum()
             rng = np.random.default_rng(self.config.seed)
-            return rng.choice(2**self.n_qubits, size=n_samples, replace=True, p=probs).astype(int).tolist()
+            result = rng.choice(2**self.n_qubits, size=n_samples, replace=True, p=probs).astype(int).tolist()
+            _quantum_timing["samples"].append(timer() - t_start)
+            return result
 
         if self.config.backend == "ibm_runtime":
+            t_start = timer()
             qc = _build_grover_circuit(
                 n_qubits=self.n_qubits,
                 oracle_diag=oracle_diag,
                 n_iterations=self.config.n_iterations,
                 with_measurements=True,
             )
-            return sample_indices_ibm_runtime(
+            result = sample_indices_ibm_runtime(
                 circuits=[qc],
                 n_qubits=self.n_qubits,
                 n_samples=n_samples,
                 config=self.config.ibm,
                 seed=self.config.seed,
             )
+            _quantum_timing["samples"].append(timer() - t_start)
+            return result
 
         raise ValueError(f"Unknown backend: {self.config.backend}")

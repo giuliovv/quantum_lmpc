@@ -132,8 +132,16 @@ def augment_safe_set_with_quantum(
         thr = float(np.percentile(finite, 25.0))
 
         sampled = sampler.sample(cost_table=costs, threshold=thr, n_samples=int(cfg.n_samples_per_start))
+
+        # Track rejection reasons for diagnostics
+        n_infeasible = 0
+        n_low_v = 0
+        n_no_advance = 0
+        n_accepted = 0
+
         for sidx in sampled:
             if not np.isfinite(costs[int(sidx)]):
+                n_infeasible += 1
                 continue
             wl, wr = decode_control_sequence(int(sidx), horizon=horizon)
             x = x0.copy()
@@ -143,6 +151,7 @@ def augment_safe_set_with_quantum(
             xy = x[:2]
             vT = float(x[3]) if x.size > 3 else float("nan")
             if np.isfinite(vT) and float(vT) < float(v_floor):
+                n_low_v += 1
                 continue
 
             _, safe_idx = kd_safe.query(xy.reshape(-1), workers=-1)
@@ -150,11 +159,20 @@ def augment_safe_set_with_quantum(
             expected_J = J_start - float(horizon)
             advance = expected_J - float(safe_J[safe_idx])
             if advance < float(cfg.min_advance_steps):
+                n_no_advance += 1
                 continue
 
+            n_accepted += 1
             # Label J with the snapped safe-set point (progress along the lap).
             J_new = float(safe_J[safe_idx])
             new_cols.append(np.concatenate([x.reshape(-1), np.array([J_new], dtype=float)]))
+
+        # Log rejection stats if verbose (check for environment variable)
+        import os
+        if os.environ.get("QUANTUM_LMPC_VERBOSE"):
+            n_feasible_in_table = int(np.sum(np.isfinite(costs)))
+            print(f"  [augment] start={si}: samples={len(sampled)}, feasible_table={n_feasible_in_table}/{n_total}, "
+                  f"rejected: infeasible={n_infeasible}, low_v={n_low_v}, no_advance={n_no_advance}, accepted={n_accepted}")
 
     if not new_cols:
         return last_points_with_time
