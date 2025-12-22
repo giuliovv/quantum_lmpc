@@ -58,6 +58,7 @@ def run_compare(
     *,
     cfg: DuckietownCompareConfig,
     quantum: bool,
+    enable_augment: bool,
     quantum_backend: str,
     quantum_horizon: int,
     quantum_samples_per_start: int,
@@ -238,6 +239,7 @@ def run_compare(
         run_cfg=run_cfg,
         n_iterations=int(cfg.n_iterations),
         quantum_cfg=qcfg,
+        enable_augment=bool(enable_augment),
     )
 
     # Capture quantum timing
@@ -256,6 +258,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--i-j", type=int, default=4, help="Number of past laps in safe set (requires matching LMPC.casadi)")
     parser.add_argument("--N", type=int, default=3, help="LMPC horizon (requires matching LMPC.casadi)")
     parser.add_argument("--quantum", action="store_true", default=False)
+    parser.add_argument(
+        "--no-augment",
+        action="store_true",
+        default=False,
+        help="Disable the quantum safe-set augmentation step (keeps baseline behavior).",
+    )
     parser.add_argument("--quantum-backend", choices=["statevector", "ibm_runtime"], default="statevector")
     parser.add_argument("--ibm", action="store_true", default=False, help="Shorthand for --quantum-backend ibm_runtime (run on real IBM Q hardware)")
     parser.add_argument("--quantum-horizon", type=int, default=4)
@@ -282,6 +290,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     baseline, quantum_res, traj3, inside_xy, outside_xy, quantum_timing = run_compare(
         cfg=cfg,
         quantum=bool(args.quantum),
+        enable_augment=not bool(args.no_augment),
         quantum_backend=quantum_backend,
         quantum_horizon=int(args.quantum_horizon),
         quantum_samples_per_start=int(args.quantum_samples_per_start),
